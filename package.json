@@ -1,0 +1,30 @@
+{
+  "name": "perler-bead-inventory",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "prepare:ocr": "node scripts/copy-ocr-assets.mjs",
+    "predev": "npm run prepare:ocr",
+    "dev": "vite",
+    "prebuild": "npm run prepare:ocr",
+    "build": "tsc -b && vite build",
+    "test": "vitest run",
+    "generate:colors": "python3 scripts/extract_colors.py"
+  },
+  "dependencies": {
+    "@tesseract.js-data/eng": "^1.0.0",
+    "lucide-react": "^0.468.0",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "tesseract.js": "^7.0.0"
+  },
+  "devDependencies": {
+    "@types/react": "^18.3.12",
+    "@types/react-dom": "^18.3.1",
+    "@vitejs/plugin-react": "^4.3.4",
+    "typescript": "^5.7.2",
+    "vite": "^6.0.3",
+    "vitest": "^2.1.8"
+  }
+}
