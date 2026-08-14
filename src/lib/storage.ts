@@ -1,19 +1,16 @@
 import type { AppData, AuthUser } from "../types";
+import type { User } from "@supabase/supabase-js";
+import { dataUrlToBlob } from "./image";
+import { supabase } from "./supabase";
 
 const DB_NAME = "perler-bead-inventory";
 const STORE_NAME = "app-state";
 const LEGACY_STATE_KEY = "current";
-const SESSION_KEY = "auth-session";
+const APP_DATA_TABLE = "user_app_data";
+const PATTERN_IMAGE_BUCKET = "pattern-images";
 
-type StoredAccount = AuthUser & {
-  passwordHash: string;
-  passwordSalt: string;
-  updatedAt: string;
-};
-
-type AuthSession = {
-  userId: string;
-  signedInAt: string;
+type AppDataRow = {
+  data: Partial<AppData> | null;
 };
 
 export const createEmptyData = (): AppData => ({
@@ -27,12 +24,12 @@ export const createEmptyData = (): AppData => ({
   },
 });
 
-export function normalizePhone(phone: string) {
-  return phone.replace(/\D/g, "");
+export function normalizeEmail(email: string) {
+  return email.trim().toLowerCase();
 }
 
-export function validatePhone(phone: string) {
-  return /^\d{11}$/.test(normalizePhone(phone));
+export function validateEmail(email: string) {
+  return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(normalizeEmail(email));
 }
 
 export function validatePassword(password: string) {
@@ -57,20 +54,101 @@ function userDataKey(userId: string) {
   return `user-data:${userId}`;
 }
 
-function accountPhoneKey(phone: string) {
-  return `account-phone:${phone}`;
-}
-
-function accountIdKey(userId: string) {
-  return `account-id:${userId}`;
-}
-
-function toPublicUser(account: StoredAccount): AuthUser {
+function toPublicUser(user: User): AuthUser {
+  if (!user.email) throw new Error("账号缺少邮箱信息，请重新登录");
   return {
-    id: account.id,
-    phone: account.phone,
-    createdAt: account.createdAt,
+    id: user.id,
+    email: user.email,
+    createdAt: user.created_at,
   };
+}
+
+function authErrorMessage(message: string, fallback = "操作失败，请稍后再试") {
+  if (message.includes("Invalid login credentials")) return "邮箱或密码错误";
+  if (message.includes("Email not confirmed")) return "请先前往邮箱完成验证，再登录";
+  if (message.includes("User already registered")) return "该邮箱已注册";
+  if (message.includes("Password should be")) return "密码不符合平台要求，请换一个更安全的密码";
+  return message || fallback;
+}
+
+function dataErrorMessage(message: string) {
+  if (message.includes("JWT")) return "登录状态已过期，请重新登录";
+  if (message.includes("permission denied") || message.includes("row-level security")) return "没有权限访问该账号数据";
+  return message || "数据同步失败，请稍后再试";
+}
+
+function isDataUrl(value: string | undefined): value is string {
+  return Boolean(value?.startsWith("data:image/"));
+}
+
+function imageExtension(blob: Blob) {
+  if (blob.type === "image/png") return "png";
+  if (blob.type === "image/webp") return "webp";
+  return "jpg";
+}
+
+function imageStoragePath(userId: string, patternId: string, blob: Blob) {
+  return `${userId}/${patternId}.${imageExtension(blob)}`;
+}
+
+function getPublicImageUrl(path: string) {
+  const { data } = supabase.storage.from(PATTERN_IMAGE_BUCKET).getPublicUrl(path);
+  return data.publicUrl;
+}
+
+function imagePathFromPublicUrl(imageUrl: string | undefined) {
+  if (!imageUrl || isDataUrl(imageUrl)) return null;
+  const marker = `/storage/v1/object/public/${PATTERN_IMAGE_BUCKET}/`;
+  try {
+    const pathname = new URL(imageUrl).pathname;
+    const index = pathname.indexOf(marker);
+    if (index === -1) return null;
+    return decodeURIComponent(pathname.slice(index + marker.length));
+  } catch {
+    return null;
+  }
+}
+
+export async function uploadPatternImage(userId: string, patternId: string, blob: Blob): Promise<string> {
+  const path = imageStoragePath(userId, patternId, blob);
+  const { error } = await supabase.storage
+    .from(PATTERN_IMAGE_BUCKET)
+    .upload(path, blob, {
+      cacheControl: "31536000",
+      contentType: blob.type || "image/jpeg",
+      upsert: true,
+    });
+  if (error) throw new Error(dataErrorMessage(error.message));
+  return getPublicImageUrl(path);
+}
+
+export async function deletePatternImage(imageUrl: string | undefined) {
+  const path = imagePathFromPublicUrl(imageUrl);
+  if (!path) return;
+  const { error } = await supabase.storage.from(PATTERN_IMAGE_BUCKET).remove([path]);
+  if (error) throw new Error(dataErrorMessage(error.message));
+}
+
+async function deletePatternImagesForUser(userId: string) {
+  const { data, error } = await supabase.storage.from(PATTERN_IMAGE_BUCKET).list(userId);
+  if (error) throw new Error(dataErrorMessage(error.message));
+  const paths = (data ?? [])
+    .filter((item) => !item.name.endsWith("/"))
+    .map((item) => `${userId}/${item.name}`);
+  if (!paths.length) return;
+  const { error: removeError } = await supabase.storage.from(PATTERN_IMAGE_BUCKET).remove(paths);
+  if (removeError) throw new Error(dataErrorMessage(removeError.message));
+}
+
+async function migratePatternImages(userId: string, data: AppData): Promise<AppData> {
+  let changed = false;
+  const patterns = await Promise.all(data.patterns.map(async (pattern) => {
+    if (!isDataUrl(pattern.imageDataUrl)) return pattern;
+    const imageUrl = await uploadPatternImage(userId, pattern.id, dataUrlToBlob(pattern.imageDataUrl));
+    changed = true;
+    return { ...pattern, imageDataUrl: imageUrl };
+  }));
+  return changed ? { ...data, patterns } : data;
 }
 
 function mergeStoredData(stored: Partial<AppData> | undefined): AppData {
@@ -122,133 +200,116 @@ async function deleteValue(key: string) {
   });
 }
 
-async function hashPassword(password: string, salt: string) {
-  const bytes = new TextEncoder().encode(`${salt}:${password}`);
-  const digest = await crypto.subtle.digest("SHA-256", bytes);
-  return btoa(String.fromCharCode(...new Uint8Array(digest)));
-}
-
-function createId() {
-  return crypto.randomUUID ? crypto.randomUUID() : `${Date.now()}-${Math.random().toString(16).slice(2)}`;
-}
-
-function createSalt() {
-  const bytes = new Uint8Array(16);
-  crypto.getRandomValues(bytes);
-  return btoa(String.fromCharCode(...bytes));
-}
-
-async function setSession(userId: string) {
-  await putValue<AuthSession>(SESSION_KEY, {
-    userId,
-    signedInAt: new Date().toISOString(),
-  });
-}
-
 export async function getCurrentUser(): Promise<AuthUser | null> {
-  const session = await getValue<AuthSession>(SESSION_KEY);
-  if (!session?.userId) return null;
-  const account = await getValue<StoredAccount>(accountIdKey(session.userId));
-  if (!account) {
-    await deleteValue(SESSION_KEY);
-    return null;
-  }
-  return toPublicUser(account);
+  const { data, error } = await supabase.auth.getUser();
+  if (error || !data.user) return null;
+  return toPublicUser(data.user);
 }
 
-export async function registerAccount(phone: string, password: string): Promise<AuthUser> {
-  const normalizedPhone = normalizePhone(phone);
-  if (!validatePhone(normalizedPhone)) throw new Error("请输入 11 位手机号");
+export async function registerAccount(email: string, password: string): Promise<AuthUser> {
+  const normalizedEmail = normalizeEmail(email);
+  if (!validateEmail(normalizedEmail)) throw new Error("请输入正确的邮箱地址");
   if (!validatePassword(password)) throw new Error("密码需为 8-20 位，并包含字母和数字");
-  const existing = await getValue<StoredAccount>(accountPhoneKey(normalizedPhone));
-  if (existing) throw new Error("该手机号已注册");
+  const { data, error } = await supabase.auth.signUp({
+    email: normalizedEmail,
+    password,
+  });
+  if (error) throw new Error(authErrorMessage(error.message));
+  if (!data.user) throw new Error("注册失败，请稍后再试");
+  if (!data.session) throw new Error("注册成功，请先前往邮箱完成验证后再登录");
 
-  const now = new Date().toISOString();
-  const passwordSalt = createSalt();
-  const account: StoredAccount = {
-    id: createId(),
-    phone: normalizedPhone,
-    passwordHash: await hashPassword(password, passwordSalt),
-    passwordSalt,
-    createdAt: now,
-    updatedAt: now,
-  };
-  await putValue(accountPhoneKey(normalizedPhone), account);
-  await putValue(accountIdKey(account.id), account);
-  await putValue(userDataKey(account.id), createEmptyData());
-  await setSession(account.id);
-  return toPublicUser(account);
+  await saveData(data.user.id, createEmptyData());
+  return toPublicUser(data.user);
 }
 
-export async function loginAccount(phone: string, password: string): Promise<AuthUser> {
-  const normalizedPhone = normalizePhone(phone);
-  const account = await getValue<StoredAccount>(accountPhoneKey(normalizedPhone));
-  if (!account) throw new Error("手机号或密码错误");
-  const passwordHash = await hashPassword(password, account.passwordSalt);
-  if (passwordHash !== account.passwordHash) throw new Error("手机号或密码错误");
-  await setSession(account.id);
-  return toPublicUser(account);
+export async function loginAccount(email: string, password: string): Promise<AuthUser> {
+  const normalizedEmail = normalizeEmail(email);
+  if (!validateEmail(normalizedEmail)) throw new Error("请输入正确的邮箱地址");
+  const { data, error } = await supabase.auth.signInWithPassword({
+    email: normalizedEmail,
+    password,
+  });
+  if (error) throw new Error(authErrorMessage(error.message));
+  if (!data.user) throw new Error("登录失败，请稍后再试");
+  return toPublicUser(data.user);
 }
 
 export async function logoutAccount() {
-  await deleteValue(SESSION_KEY);
+  const { error } = await supabase.auth.signOut();
+  if (error) throw new Error(authErrorMessage(error.message));
 }
 
-export async function resetPassword(phone: string, password: string) {
-  const normalizedPhone = normalizePhone(phone);
-  if (!validatePhone(normalizedPhone)) throw new Error("请输入 11 位手机号");
-  if (!validatePassword(password)) throw new Error("密码需为 8-20 位，并包含字母和数字");
-  const account = await getValue<StoredAccount>(accountPhoneKey(normalizedPhone));
-  if (!account) throw new Error("该手机号尚未注册");
-  const passwordSalt = createSalt();
-  const nextAccount: StoredAccount = {
-    ...account,
-    passwordHash: await hashPassword(password, passwordSalt),
-    passwordSalt,
-    updatedAt: new Date().toISOString(),
-  };
-  await putValue(accountPhoneKey(normalizedPhone), nextAccount);
-  await putValue(accountIdKey(nextAccount.id), nextAccount);
+export async function resetPassword(email: string) {
+  const normalizedEmail = normalizeEmail(email);
+  if (!validateEmail(normalizedEmail)) throw new Error("请输入正确的邮箱地址");
+  const { error } = await supabase.auth.resetPasswordForEmail(normalizedEmail, {
+    redirectTo: window.location.origin,
+  });
+  if (error) throw new Error(authErrorMessage(error.message));
 }
 
 export async function changePassword(userId: string, oldPassword: string, nextPassword: string) {
   if (!validatePassword(nextPassword)) throw new Error("新密码需为 8-20 位，并包含字母和数字");
-  const account = await getValue<StoredAccount>(accountIdKey(userId));
-  if (!account) throw new Error("账号不存在，请重新登录");
-  const oldPasswordHash = await hashPassword(oldPassword, account.passwordSalt);
-  if (oldPasswordHash !== account.passwordHash) throw new Error("当前密码不正确");
-  const passwordSalt = createSalt();
-  const nextAccount: StoredAccount = {
-    ...account,
-    passwordHash: await hashPassword(nextPassword, passwordSalt),
-    passwordSalt,
-    updatedAt: new Date().toISOString(),
-  };
-  await putValue(accountPhoneKey(account.phone), nextAccount);
-  await putValue(accountIdKey(account.id), nextAccount);
+  const { data: current, error: currentError } = await supabase.auth.getUser();
+  if (currentError || !current.user || current.user.id !== userId) throw new Error("账号不存在，请重新登录");
+  if (!current.user.email) throw new Error("账号缺少邮箱信息，请重新登录");
+
+  const { error: verifyError } = await supabase.auth.signInWithPassword({
+    email: current.user.email,
+    password: oldPassword,
+  });
+  if (verifyError) throw new Error("当前密码不正确");
+
+  const { error } = await supabase.auth.updateUser({ password: nextPassword });
+  if (error) throw new Error(authErrorMessage(error.message, "修改失败，请稍后再试"));
 }
 
 export async function deleteAccount(userId: string) {
-  const account = await getValue<StoredAccount>(accountIdKey(userId));
-  if (!account) return;
-  await deleteValue(accountPhoneKey(account.phone));
-  await deleteValue(accountIdKey(account.id));
-  await deleteValue(userDataKey(account.id));
-  const session = await getValue<AuthSession>(SESSION_KEY);
-  if (session?.userId === userId) await deleteValue(SESSION_KEY);
+  await deleteValue(userDataKey(userId));
+  await deletePatternImagesForUser(userId);
+  const { error } = await supabase
+    .from(APP_DATA_TABLE)
+    .delete()
+    .eq("user_id", userId);
+  if (error) throw new Error(dataErrorMessage(error.message));
+  await logoutAccount();
 }
 
 export async function loadData(userId: string): Promise<AppData> {
-  const stored = await getValue<Partial<AppData>>(userDataKey(userId));
-  return mergeStoredData(stored);
+  const { data, error } = await supabase
+    .from(APP_DATA_TABLE)
+    .select("data")
+    .eq("user_id", userId)
+    .maybeSingle<AppDataRow>();
+  if (error) throw new Error(dataErrorMessage(error.message));
+  if (data?.data) {
+    const storedData = mergeStoredData(data.data);
+    const migratedData = await migratePatternImages(userId, storedData);
+    if (migratedData !== storedData) await saveData(userId, migratedData);
+    return migratedData;
+  }
+
+  const localData = await getValue<Partial<AppData>>(userDataKey(userId));
+  const initialData = mergeStoredData(localData);
+  const migratedData = await migratePatternImages(userId, initialData);
+  await saveData(userId, migratedData);
+  return migratedData;
 }
 
 export async function saveData(userId: string, data: AppData) {
-  await putValue(userDataKey(userId), data);
+  const { error } = await supabase
+    .from(APP_DATA_TABLE)
+    .upsert({
+      user_id: userId,
+      data,
+    });
+  if (error) throw new Error(dataErrorMessage(error.message));
 }
 
 export async function clearStoredData(userId: string) {
-  await putValue(userDataKey(userId), createEmptyData());
+  await deleteValue(userDataKey(userId));
+  await deletePatternImagesForUser(userId);
+  await saveData(userId, createEmptyData());
 }
 
 export async function loadLegacyData(): Promise<AppData> {

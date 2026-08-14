@@ -65,7 +65,7 @@ export type AppData = {
 
 export type AuthUser = {
   id: string;
-  phone: string;
+  email: string;
   createdAt: string;
 };
 

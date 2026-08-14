@@ -1,22 +1,31 @@
 import { useState } from "react";
-import { KeyRound, LogIn, LogOut, Phone, ShieldAlert, Trash2, UserPlus } from "lucide-react";
+import { KeyRound, LogIn, LogOut, Mail, ShieldAlert, Trash2, UserPlus } from "lucide-react";
 import { ConfirmDialog, PageBody, TopBar } from "../components";
 import { useAppStore } from "../store";
-import { validatePassword, validatePhone } from "../lib/storage";
+import { validateEmail, validatePassword } from "../lib/storage";
 
 type AuthMode = "login" | "register" | "recover";
 
-function fieldError(phone: string, password: string, confirmPassword?: string) {
-  if (!validatePhone(phone)) return "请输入 11 位手机号";
+function passwordFieldError(password: string, confirmPassword?: string) {
   if (!validatePassword(password)) return "密码需为 8-20 位，并包含字母和数字";
   if (confirmPassword !== undefined && password !== confirmPassword) return "两次输入的密码不一致";
+  return "";
+}
+
+function authFieldError(email: string, password: string, confirmPassword?: string) {
+  if (!validateEmail(email)) return "请输入正确的邮箱地址";
+  return passwordFieldError(password, confirmPassword);
+}
+
+function emailFieldError(email: string) {
+  if (!validateEmail(email)) return "请输入正确的邮箱地址";
   return "";
 }
 
 export function AuthPage() {
   const { login, register, recoverPassword } = useAppStore();
   const [mode, setMode] = useState<AuthMode>("login");
-  const [phone, setPhone] = useState("");
+  const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [confirmPassword, setConfirmPassword] = useState("");
   const [message, setMessage] = useState("");
@@ -32,7 +41,11 @@ export function AuthPage() {
   };
 
   const submit = async () => {
-    const validation = mode === "login" ? fieldError(phone, password) : fieldError(phone, password, confirmPassword);
+    const validation = mode === "recover"
+      ? emailFieldError(email)
+      : mode === "login"
+        ? authFieldError(email, password)
+        : authFieldError(email, password, confirmPassword);
     if (validation) {
       setError(validation);
       return;
@@ -42,18 +55,18 @@ export function AuthPage() {
     setMessage("");
     try {
       if (mode === "login") {
-        await login(phone, password);
+        await login(email, password);
         return;
       }
       if (mode === "register") {
-        await register(phone, password);
+        await register(email, password);
         return;
       }
-      await recoverPassword(phone, password);
+      await recoverPassword(email);
       setMode("login");
       setPassword("");
       setConfirmPassword("");
-      setMessage("密码已重置，请使用新密码登录");
+      setMessage("重置邮件已发送，请前往邮箱继续操作");
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : "操作失败，请稍后再试");
     } finally {
@@ -62,7 +75,7 @@ export function AuthPage() {
   };
 
   const title = mode === "login" ? "登录豆仓" : mode === "register" ? "注册账号" : "找回密码";
-  const actionLabel = mode === "login" ? "登录" : mode === "register" ? "注册并登录" : "重置密码";
+  const actionLabel = mode === "login" ? "登录" : mode === "register" ? "注册并登录" : "发送重置邮件";
   const ActionIcon = mode === "register" ? UserPlus : mode === "recover" ? KeyRound : LogIn;
 
   return (
@@ -78,36 +91,37 @@ export function AuthPage() {
 
         <div className="auth-form">
           <label className="auth-field">
-            <span>手机号</span>
+            <span>邮箱</span>
             <div>
-              <Phone size={18} />
+              <Mail size={18} />
               <input
-                type="tel"
-                inputMode="numeric"
-                autoComplete="tel"
-                value={phone}
-                maxLength={11}
-                onChange={(event) => setPhone(event.target.value.replace(/\D/g, "").slice(0, 11))}
-                placeholder="请输入 11 位手机号"
+                type="email"
+                inputMode="email"
+                autoComplete="email"
+                value={email}
+                onChange={(event) => setEmail(event.target.value)}
+                placeholder="请输入邮箱地址"
               />
             </div>
           </label>
 
-          <label className="auth-field">
-            <span>{mode === "recover" ? "新密码" : "密码"}</span>
-            <div>
-              <KeyRound size={18} />
-              <input
-                type="password"
-                autoComplete={mode === "login" ? "current-password" : "new-password"}
-                value={password}
-                onChange={(event) => setPassword(event.target.value)}
-                placeholder="8-20 位，包含字母和数字"
-              />
-            </div>
-          </label>
+          {mode !== "recover" ? (
+            <label className="auth-field">
+              <span>密码</span>
+              <div>
+                <KeyRound size={18} />
+                <input
+                  type="password"
+                  autoComplete={mode === "login" ? "current-password" : "new-password"}
+                  value={password}
+                  onChange={(event) => setPassword(event.target.value)}
+                  placeholder="8-20 位，包含字母和数字"
+                />
+              </div>
+            </label>
+          ) : null}
 
-          {mode !== "login" ? (
+          {mode === "register" ? (
             <label className="auth-field">
               <span>确认密码</span>
               <div>
@@ -124,10 +138,10 @@ export function AuthPage() {
           ) : null}
 
           {mode === "register" ? (
-            <p className="auth-note">注册即代表同意使用当前浏览器保存账号数据。</p>
+            <p className="auth-note">注册后可使用邮箱和密码登录账号。</p>
           ) : null}
           {mode === "recover" ? (
-            <p className="auth-note">当前版本不会发送验证码，重置后可直接使用新密码登录。</p>
+            <p className="auth-note">系统会向该邮箱发送 Supabase 密码重置邮件。</p>
           ) : null}
           {message ? <p className="auth-message">{message}</p> : null}
           {error ? <p className="auth-error">{error}</p> : null}
@@ -158,8 +172,8 @@ export function AccountSettingsPage({ back }: { back: () => void }) {
   const [showDelete, setShowDelete] = useState(false);
 
   const savePassword = async () => {
-    const validation = fieldError(user?.phone ?? "", nextPassword, confirmPassword);
-    if (validation && !validation.startsWith("请输入")) {
+    const validation = passwordFieldError(nextPassword, confirmPassword);
+    if (validation) {
       setError(validation);
       return;
     }
@@ -188,9 +202,9 @@ export function AccountSettingsPage({ back }: { back: () => void }) {
       <TopBar title="账号设置" onBack={back} />
       <PageBody className="form-page">
         <section className="account-card">
-          <span className="account-card__avatar">{user?.phone.slice(-2)}</span>
+          <span className="account-card__avatar">{user?.email.slice(0, 1).toUpperCase()}</span>
           <div>
-            <strong>{user?.phone}</strong>
+            <strong>{user?.email}</strong>
             <small>当前登录账号</small>
           </div>
         </section>
@@ -216,21 +230,21 @@ export function AccountSettingsPage({ back }: { back: () => void }) {
             <LogOut size={18} />退出登录
           </button>
           <button className="button button--plain-danger button--full" onClick={() => setShowDelete(true)}>
-            <Trash2 size={18} />注销账号
+            <Trash2 size={18} />清空账号数据
           </button>
         </section>
       </PageBody>
 
       {showDelete ? (
         <ConfirmDialog
-          title="注销当前账号？"
+          title="清空账号数据？"
           description={(
             <div className="dialog-warning">
               <ShieldAlert size={20} />
-              <span>账号和该账号下的库存、图纸、消耗记录、设置都会被删除，且无法恢复。</span>
+              <span>该账号下的库存、图纸、消耗记录、设置会被清空，并退出登录。Supabase 账号本身不会被删除。</span>
             </div>
           )}
-          confirmLabel="确认注销"
+          confirmLabel="确认清空"
           danger
           onCancel={() => setShowDelete(false)}
           onConfirm={() => { void deleteCurrentAccount(); setShowDelete(false); }}

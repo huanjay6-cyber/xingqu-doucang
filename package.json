@@ -13,6 +13,7 @@
     "generate:colors": "python3 scripts/extract_colors.py"
   },
   "dependencies": {
+    "@supabase/supabase-js": "^2.112.3",
     "@tesseract.js-data/eng": "^1.0.0",
     "lucide-react": "^0.468.0",
     "react": "^18.3.1",

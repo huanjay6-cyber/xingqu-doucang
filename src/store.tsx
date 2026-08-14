@@ -21,10 +21,10 @@ type AppStoreValue = {
   user: AuthUser | null;
   updateData: (updater: (current: AppData) => AppData) => void;
   resetData: () => Promise<void>;
-  login: (phone: string, password: string) => Promise<void>;
-  register: (phone: string, password: string) => Promise<void>;
+  login: (email: string, password: string) => Promise<void>;
+  register: (email: string, password: string) => Promise<void>;
   logout: () => Promise<void>;
-  recoverPassword: (phone: string, password: string) => Promise<void>;
+  recoverPassword: (email: string) => Promise<void>;
   changeCurrentPassword: (oldPassword: string, nextPassword: string) => Promise<void>;
   deleteCurrentAccount: () => Promise<void>;
 };
@@ -41,12 +41,15 @@ export function AppStoreProvider({ children }: PropsWithChildren) {
     getCurrentUser()
       .then(async (currentUser) => {
         if (!active) return;
-        setUser(currentUser);
         if (!currentUser) {
+          setUser(null);
           setData(createEmptyData());
           return;
         }
-        setData(await loadData(currentUser.id));
+        const currentData = await loadData(currentUser.id);
+        if (!active) return;
+        setUser(currentUser);
+        setData(currentData);
       })
       .catch(() => {
         if (active) {
@@ -81,16 +84,17 @@ export function AppStoreProvider({ children }: PropsWithChildren) {
   }, [user]);
 
   const loadUserData = useCallback(async (nextUser: AuthUser) => {
+    const nextData = await loadData(nextUser.id);
     setUser(nextUser);
-    setData(await loadData(nextUser.id));
+    setData(nextData);
   }, []);
 
-  const login = useCallback(async (phone: string, password: string) => {
-    await loadUserData(await loginAccount(phone, password));
+  const login = useCallback(async (email: string, password: string) => {
+    await loadUserData(await loginAccount(email, password));
   }, [loadUserData]);
 
-  const register = useCallback(async (phone: string, password: string) => {
-    await loadUserData(await registerAccount(phone, password));
+  const register = useCallback(async (email: string, password: string) => {
+    await loadUserData(await registerAccount(email, password));
   }, [loadUserData]);
 
   const logout = useCallback(async () => {
@@ -99,8 +103,8 @@ export function AppStoreProvider({ children }: PropsWithChildren) {
     setData(createEmptyData());
   }, []);
 
-  const recoverPassword = useCallback(async (phone: string, password: string) => {
-    await resetPassword(phone, password);
+  const recoverPassword = useCallback(async (email: string) => {
+    await resetPassword(email);
   }, []);
 
   const changeCurrentPassword = useCallback(async (oldPassword: string, nextPassword: string) => {

@@ -44,10 +44,13 @@ export function parseColorSummary(text: string): RecognizedUsage[] {
 export async function recognizeColorSummary(
   file: File,
   onProgress: (progress: number) => void,
+  options: { scope?: "auto" | "selected" } = {},
 ): Promise<RecognizedUsage[]> {
   onProgress(2);
   const image = await loadFileImage(file);
-  const coarseCrop = await createCoarseCrop(image);
+  const coarseCrop = options.scope === "selected"
+    ? await createSelectedCrop(image)
+    : await createCoarseCrop(image);
   onProgress(8);
 
   const { createWorker, OEM, PSM } = await import("tesseract.js");
@@ -81,6 +84,10 @@ export async function recognizeColorSummary(
       { text: true, blocks: true },
     );
     completedPasses += 1;
+    if (options.scope === "selected") {
+      onProgress(100);
+      return parseColorSummary(coarseResult.data.text);
+    }
     const candidateLines = coarseResult.data.blocks
       ?.flatMap((block) => block.paragraphs.flatMap((paragraph) => paragraph.lines))
       .filter((line) => parseColorSummary(line.text).length) ?? [];
@@ -159,6 +166,25 @@ async function createCoarseCrop(image: HTMLImageElement): Promise<PreparedCrop> 
     sourceTop,
     scale,
     canvasHeight: Math.max(1, Math.round(sourceHeight * scale)),
+  };
+}
+
+async function createSelectedCrop(image: HTMLImageElement): Promise<PreparedCrop> {
+  const targetWidth = Math.min(3200, Math.max(1800, image.naturalWidth));
+  const scale = targetWidth / image.naturalWidth;
+  const blob = await createCropBlob(
+    image,
+    0,
+    0,
+    image.naturalWidth,
+    image.naturalHeight,
+    targetWidth,
+  );
+  return {
+    blob,
+    sourceTop: 0,
+    scale,
+    canvasHeight: Math.max(1, Math.round(image.naturalHeight * scale)),
   };
 }
 

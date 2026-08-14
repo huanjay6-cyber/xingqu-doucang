@@ -1,4 +1,5 @@
-import { useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
+import type { PointerEvent } from "react";
 import {
   Camera,
   Check,
@@ -13,9 +14,11 @@ import {
   X,
 } from "lucide-react";
 import { beadColors } from "../data/colors";
-import { compressImage } from "../lib/image";
+import { compressImage, cropImageFile, dataUrlToBlob } from "../lib/image";
+import type { CropRegion } from "../lib/image";
 import { formatQuantity, getColorSummary, usageQuantity } from "../lib/inventory";
 import { recognizeColorSummary } from "../lib/ocr";
+import { deletePatternImage, uploadPatternImage } from "../lib/storage";
 import type { RecognizedUsage } from "../lib/ocr";
 import type { Pattern, PatternUsage } from "../types";
 import { useAppStore } from "../store";
@@ -94,6 +97,95 @@ function RecognitionDialog({
   );
 }
 
+function CropSelectionDialog({
+  file,
+  onCancel,
+  onRecognize,
+}: {
+  file: File;
+  onCancel: () => void;
+  onRecognize: (region: CropRegion) => void;
+}) {
+  const [imageUrl, setImageUrl] = useState("");
+  const [dragStart, setDragStart] = useState<{ x: number; y: number } | null>(null);
+  const [selection, setSelection] = useState<CropRegion | null>(null);
+  const frameRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    const url = URL.createObjectURL(file);
+    setImageUrl(url);
+    return () => URL.revokeObjectURL(url);
+  }, [file]);
+
+  const getPoint = (event: PointerEvent<HTMLDivElement>) => {
+    const rect = frameRef.current?.getBoundingClientRect();
+    if (!rect) return { x: 0, y: 0 };
+    return {
+      x: Math.min(1, Math.max(0, (event.clientX - rect.left) / rect.width)),
+      y: Math.min(1, Math.max(0, (event.clientY - rect.top) / rect.height)),
+    };
+  };
+
+  const updateSelection = (start: { x: number; y: number }, end: { x: number; y: number }) => {
+    const x = Math.min(start.x, end.x);
+    const y = Math.min(start.y, end.y);
+    const width = Math.abs(end.x - start.x);
+    const height = Math.abs(end.y - start.y);
+    setSelection({ x, y, width, height });
+  };
+
+  const ready = Boolean(selection && selection.width > 0.025 && selection.height > 0.025);
+
+  return (
+    <div className="dialog-backdrop" role="presentation" onMouseDown={onCancel}>
+      <section className="crop-dialog" role="dialog" aria-modal="true" aria-labelledby="crop-title" onMouseDown={(event) => event.stopPropagation()}>
+        <header>
+          <div><span>框选区域</span><h2 id="crop-title">色号统计</h2></div>
+          <button className="icon-button" onClick={onCancel} aria-label="关闭框选"><X size={20} /></button>
+        </header>
+        <div className="crop-stage">
+          <div
+            ref={frameRef}
+            className="crop-frame"
+            onPointerDown={(event) => {
+              const point = getPoint(event);
+              setDragStart(point);
+              updateSelection(point, point);
+              event.currentTarget.setPointerCapture(event.pointerId);
+            }}
+            onPointerMove={(event) => {
+              if (!dragStart) return;
+              updateSelection(dragStart, getPoint(event));
+            }}
+            onPointerUp={(event) => {
+              if (!dragStart) return;
+              updateSelection(dragStart, getPoint(event));
+              setDragStart(null);
+            }}
+          >
+            {imageUrl ? <img src={imageUrl} alt="图纸" draggable={false} /> : null}
+            {selection ? (
+              <span
+                className="crop-selection"
+                style={{
+                  left: `${selection.x * 100}%`,
+                  top: `${selection.y * 100}%`,
+                  width: `${selection.width * 100}%`,
+                  height: `${selection.height * 100}%`,
+                }}
+              />
+            ) : null}
+          </div>
+        </div>
+        <div className="dialog__actions">
+          <button className="button button--secondary" onClick={onCancel}>取消</button>
+          <button className="button button--primary" disabled={!ready} onClick={() => selection && onRecognize(selection)}>识别框选区域</button>
+        </div>
+      </section>
+    </div>
+  );
+}
+
 export function PatternsPage({ navigate }: Pick<NavigationProps, "navigate">) {
   const { data } = useAppStore();
   const [tab, setTab] = useState<"todo" | "done">("todo");
@@ -150,8 +242,9 @@ export function PatternsPage({ navigate }: Pick<NavigationProps, "navigate">) {
 }
 
 export function PatternFormPage({ patternId, back }: Pick<NavigationProps, "back"> & { patternId?: string }) {
-  const { data, updateData } = useAppStore();
+  const { data, updateData, user } = useAppStore();
   const existing = data.patterns.find((pattern) => pattern.id === patternId);
+  const [draftId] = useState(existing?.id ?? crypto.randomUUID());
   const [name, setName] = useState(existing?.name ?? "");
   const [status, setStatus] = useState<"todo" | "done">(existing?.status ?? "todo");
   const [imageDataUrl, setImageDataUrl] = useState(existing?.imageDataUrl);
@@ -162,6 +255,7 @@ export function PatternFormPage({ patternId, back }: Pick<NavigationProps, "back
   const [savingImage, setSavingImage] = useState(false);
   const [confirmSave, setConfirmSave] = useState(false);
   const [sourceImage, setSourceImage] = useState<File | null>(null);
+  const [showCropSelector, setShowCropSelector] = useState(false);
   const [recognitionStatus, setRecognitionStatus] = useState<"idle" | "running" | "done" | "none" | "error">("idle");
   const [recognitionProgress, setRecognitionProgress] = useState(0);
   const [recognizedUsages, setRecognizedUsages] = useState<RecognizedUsage[] | null>(null);
@@ -190,7 +284,7 @@ export function PatternFormPage({ patternId, back }: Pick<NavigationProps, "back
   const commit = () => {
     const now = new Date().toISOString();
     const pattern: Pattern = {
-      id: existing?.id ?? crypto.randomUUID(),
+      id: draftId,
       name: name.trim(),
       status,
       imageDataUrl,
@@ -205,10 +299,17 @@ export function PatternFormPage({ patternId, back }: Pick<NavigationProps, "back
         ? current.patterns.map((item) => item.id === existing.id ? pattern : item)
         : [pattern, ...current.patterns],
     }));
+    if (existing?.imageDataUrl && existing.imageDataUrl !== imageDataUrl) {
+      void deletePatternImage(existing.imageDataUrl).catch(() => undefined);
+    }
     back();
   };
 
   const attemptSave = () => {
+    if (savingImage) {
+      setError("图片还在上传，请稍等");
+      return;
+    }
     if (!name.trim()) {
       setError("请填写图纸名称");
       return;
@@ -224,18 +325,28 @@ export function PatternFormPage({ patternId, back }: Pick<NavigationProps, "back
       : usage));
   };
 
-  const runRecognition = async (file: File) => {
+  const runRecognition = async (file: File, scope: "auto" | "selected" = "auto") => {
     setRecognitionStatus("running");
     setRecognitionProgress(1);
     setRecognizedUsages(null);
     try {
-      const results = await recognizeColorSummary(file, setRecognitionProgress);
+      const results = await recognizeColorSummary(file, setRecognitionProgress, { scope });
       if (results.length) {
         setRecognitionStatus("done");
         setRecognizedUsages(results);
       } else {
         setRecognitionStatus("none");
       }
+    } catch {
+      setRecognitionStatus("error");
+    }
+  };
+
+  const recognizeSelectedRegion = async (region: CropRegion) => {
+    if (!sourceImage) return;
+    setShowCropSelector(false);
+    try {
+      await runRecognition(await cropImageFile(sourceImage, region), "selected");
     } catch {
       setRecognitionStatus("error");
     }
@@ -272,32 +383,42 @@ export function PatternFormPage({ patternId, back }: Pick<NavigationProps, "back
                 const file = event.target.files?.[0];
                 if (!file) return;
                 setSourceImage(file);
+                setRecognitionStatus("idle");
+                setRecognizedUsages(null);
                 setSavingImage(true);
                 try {
-                  setImageDataUrl(await compressImage(file));
+                  const previewUrl = await compressImage(file);
+                  setImageDataUrl(previewUrl);
+                  const imageUrl = user
+                    ? await uploadPatternImage(user.id, draftId, dataUrlToBlob(previewUrl))
+                    : previewUrl;
+                  setImageDataUrl(imageUrl);
+                } catch {
+                  setError("图片上传失败，请稍后重试");
                 } finally {
                   setSavingImage(false);
                 }
-                void runRecognition(file);
               }}
             />
             {imageDataUrl ? <img src={imageDataUrl} alt="图纸预览" /> : <><Camera size={28} /><span>{savingImage ? "正在处理" : "添加图纸图片"}</span></>}
           </label>
           {imageDataUrl ? (
             <>
-              <div className={`recognition-status recognition-status--${recognitionStatus}`}>
-                {recognitionStatus === "running" ? (
-                  <>
-                    <div><LoaderCircle className="spin" size={18} /><span>正在识别色号汇总</span><strong>{recognitionProgress}%</strong></div>
-                    <span className="recognition-progress"><i style={{ width: `${recognitionProgress}%` }} /></span>
-                  </>
-                ) : null}
-                {recognitionStatus === "done" && !recognizedUsages ? <div><Check size={18} /><span>色号汇总已填入用豆清单</span></div> : null}
-                {recognitionStatus === "none" ? <div><ScanText size={18} /><span>没有识别到色号汇总，请手动填写</span></div> : null}
-                {recognitionStatus === "error" ? <div><ScanText size={18} /><span>识别失败，可重新识别或手动填写</span></div> : null}
-              </div>
+              {recognitionStatus !== "idle" ? (
+                <div className={`recognition-status recognition-status--${recognitionStatus}`}>
+                  {recognitionStatus === "running" ? (
+                    <>
+                      <div><LoaderCircle className="spin" size={18} /><span>正在识别色号汇总</span><strong>{recognitionProgress}%</strong></div>
+                      <span className="recognition-progress"><i style={{ width: `${recognitionProgress}%` }} /></span>
+                    </>
+                  ) : null}
+                  {recognitionStatus === "done" && !recognizedUsages ? <div><Check size={18} /><span>色号汇总已填入用豆清单</span></div> : null}
+                  {recognitionStatus === "none" ? <div><ScanText size={18} /><span>没有识别到色号汇总，请手动填写</span></div> : null}
+                  {recognitionStatus === "error" ? <div><ScanText size={18} /><span>识别失败，可重新识别或手动填写</span></div> : null}
+                </div>
+              ) : null}
               <div className="image-actions">
-                {sourceImage && recognitionStatus !== "running" ? <button type="button" onClick={() => void runRecognition(sourceImage)}><ScanText size={16} />重新识别</button> : null}
+                {sourceImage && recognitionStatus !== "running" ? <button type="button" disabled={savingImage} onClick={() => setShowCropSelector(true)}><ScanText size={16} />框选识别区域</button> : null}
                 <button type="button" className="is-danger" onClick={() => { setImageDataUrl(undefined); setSourceImage(null); setRecognitionStatus("idle"); setRecognizedUsages(null); }}><Trash2 size={16} />移除图片</button>
               </div>
             </>
@@ -381,6 +502,13 @@ export function PatternFormPage({ patternId, back }: Pick<NavigationProps, "back
           onApply={applyRecognizedUsages}
         />
       ) : null}
+      {showCropSelector && sourceImage ? (
+        <CropSelectionDialog
+          file={sourceImage}
+          onCancel={() => setShowCropSelector(false)}
+          onRecognize={(region) => void recognizeSelectedRegion(region)}
+        />
+      ) : null}
     </>
   );
 }
@@ -441,6 +569,7 @@ export function PatternDetailPage({ patternId, navigate, back }: NavigationProps
           onCancel={() => setShowDelete(false)}
           onConfirm={() => {
             updateData((current) => ({ ...current, patterns: current.patterns.filter((item) => item.id !== patternId) }));
+            void deletePatternImage(pattern.imageDataUrl).catch(() => undefined);
             back();
           }}
         />

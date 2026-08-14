@@ -1353,6 +1353,74 @@ textarea:focus {
   width: 88px;
 }
 
+.crop-dialog {
+  display: flex;
+  width: min(100%, 720px);
+  max-height: min(760px, calc(100vh - 40px));
+  max-height: min(760px, calc(100dvh - 40px));
+  padding: 20px;
+  flex-direction: column;
+  border-radius: 8px;
+  background: #fff;
+  box-shadow: 0 16px 48px rgba(34, 24, 36, 0.2);
+}
+
+.crop-dialog header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.crop-dialog header span {
+  color: var(--accent);
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.crop-dialog h2 {
+  margin: 4px 0 0;
+  font-size: 19px;
+}
+
+.crop-stage {
+  display: flex;
+  min-height: 260px;
+  max-height: min(560px, calc(100dvh - 190px));
+  margin-top: 16px;
+  align-items: center;
+  justify-content: center;
+  overflow: hidden;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: #18131a;
+  touch-action: none;
+  user-select: none;
+}
+
+.crop-frame {
+  position: relative;
+  display: inline-block;
+  max-width: 100%;
+  max-height: min(560px, calc(100dvh - 190px));
+}
+
+.crop-frame img {
+  display: block;
+  max-width: 100%;
+  max-height: min(560px, calc(100dvh - 190px));
+  object-fit: contain;
+  pointer-events: none;
+}
+
+.crop-selection {
+  position: absolute;
+  border: 2px solid #fff;
+  background: rgba(255, 255, 255, 0.12);
+  box-shadow: 0 0 0 999px rgba(12, 9, 14, 0.48), 0 0 0 1px var(--accent);
+  pointer-events: none;
+}
+
 .usage-list {
   border-top: 1px solid var(--line);
 }
