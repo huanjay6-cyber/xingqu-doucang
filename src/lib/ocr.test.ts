@@ -28,6 +28,14 @@ describe("图纸汇总区解析", () => {
     expect(parseColorSummary("H02 3483 H04 38")).toEqual([{ colorId: "H2", quantity: 3483 }]);
   });
 
+  it("用户框选汇总区时允许识别丢失括号的小数量", () => {
+    expect(parseColorSummary("H02 3483 H04 38 H05 76", { allowLooseQuantities: true })).toEqual([
+      { colorId: "H2", quantity: 3483 },
+      { colorId: "H4", quantity: 38 },
+      { colorId: "H5", quantity: 76 },
+    ]);
+  });
+
   it("合并同一汇总区中括号完整和三位以上括号缺失的条目", () => {
     expect(parseColorSummary("H09 (383) H03 (197) H02 3483 H07 1757 H05 76")).toEqual([
       { colorId: "H9", quantity: 383 },
