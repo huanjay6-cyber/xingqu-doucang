@@ -7,6 +7,10 @@ export type RecognizedUsage = {
 
 const knownColorIds = new Set(beadColors.map((color) => color.id));
 
+type ParseColorSummaryOptions = {
+  allowLooseQuantities?: boolean;
+};
+
 function normalizeColorCode(letter: string, rawDigits: string) {
   const digits = rawDigits.toUpperCase().replaceAll("O", "0");
   const number = Number(digits);
@@ -15,7 +19,7 @@ function normalizeColorCode(letter: string, rawDigits: string) {
   return knownColorIds.has(colorId) ? colorId : null;
 }
 
-export function parseColorSummary(text: string): RecognizedUsage[] {
+export function parseColorSummary(text: string, options: ParseColorSummaryOptions = {}): RecognizedUsage[] {
   const results = new Map<string, { quantity: number; index: number }>();
   const normalized = text.toUpperCase().replaceAll("，", ",");
   const strictPattern = /\b([A-HM])\s*([0-9O]{1,3})\s*[（([{]\s*([0-9]{1,6})\s*[）)\]}]/g;
@@ -34,7 +38,9 @@ export function parseColorSummary(text: string): RecognizedUsage[] {
 
   // OCR occasionally drops brackets. Requiring at least three quantity digits
   // prevents row and column labels from being mistaken for summary entries.
-  addMatches(/\b([A-HM])\s*([0-9O]{1,3})\s+([0-9]{3,6})\b/g);
+  addMatches(options.allowLooseQuantities
+    ? /\b([A-HM])\s*([0-9O]{1,3})\s+([0-9]{1,6})\b/g
+    : /\b([A-HM])\s*([0-9O]{1,3})\s+([0-9]{3,6})\b/g);
 
   return [...results.entries()]
     .sort(([, left], [, right]) => left.index - right.index)
@@ -85,8 +91,21 @@ export async function recognizeColorSummary(
     );
     completedPasses += 1;
     if (options.scope === "selected") {
+      const selectedUsages = new Map<string, RecognizedUsage>();
+      parseColorSummary(coarseResult.data.text, { allowLooseQuantities: true }).forEach((usage) => {
+        selectedUsages.set(usage.colorId, usage);
+      });
+      const detailCrops = await createDetailCrops(image, 0, image.naturalHeight);
+      await worker.setParameters({ tessedit_pageseg_mode: PSM.SPARSE_TEXT });
+      for (const detailCrop of detailCrops) {
+        const result = await worker.recognize(detailCrop);
+        parseColorSummary(result.data.text, { allowLooseQuantities: true }).forEach((usage) => {
+          selectedUsages.set(usage.colorId, usage);
+        });
+        completedPasses += 1;
+      }
       onProgress(100);
-      return parseColorSummary(coarseResult.data.text);
+      return [...selectedUsages.values()];
     }
     const candidateLines = coarseResult.data.blocks
       ?.flatMap((block) => block.paragraphs.flatMap((paragraph) => paragraph.lines))
